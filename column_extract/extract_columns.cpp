@@ -1,85 +1,123 @@
-#include <iostream>
 #include <pcl/ModelCoefficients.h>
 #include <pcl/io/pcd_io.h>
 #include <pcl/point_types.h>
+#include <pcl/filters/extract_indices.h>
+#include <pcl/filters/passthrough.h>
+#include <pcl/features/normal_3d.h>
 #include <pcl/sample_consensus/method_types.h>
 #include <pcl/sample_consensus/model_types.h>
 #include <pcl/segmentation/sac_segmentation.h>
-#include <pcl/filters/voxel_grid.h>
-#include <pcl/filters/extract_indices.h>
+#include <pcl/features/normal_3d_omp.h>
+#include <ctime>
+#include <fstream>
+#include <iostream>
+
+typedef pcl::PointXYZ PointT;//rename PointXYZ PointT
+using namespace std;
 
 int
 main ()
 {
-  pcl::PCLPointCloud2::Ptr cloud_blob (new pcl::PCLPointCloud2), cloud_filtered_blob (new pcl::PCLPointCloud2);
-  pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_filtered (new pcl::PointCloud<pcl::PointXYZ>), cloud_p (new pcl::PointCloud<pcl::PointXYZ>), cloud_f (new pcl::PointCloud<pcl::PointXYZ>);
-
-  // Fill in the cloud data
+  // All the objects needed
   pcl::PCDReader reader;
-  reader.read ("/home/kangrui/Data/FP_point/GZB_3_Cloud_4.pcd", *cloud_blob);
-
-  std::cerr << "PointCloud before filtering: " << cloud_blob->width * cloud_blob->height << " data points." << std::endl;
-
-  // Create the filtering object: downsample the dataset using a leaf size of 1cm
-  pcl::VoxelGrid<pcl::PCLPointCloud2> sor;
-  sor.setInputCloud (cloud_blob);
-  sor.setLeafSize (0.01f, 0.01f, 0.01f);
-  sor.filter (*cloud_filtered_blob);
-
-  // Convert to the templated PointCloud
-  pcl::fromPCLPointCloud2 (*cloud_filtered_blob, *cloud_filtered);
-
-  std::cerr << "PointCloud after filtering: " << cloud_filtered->width * cloud_filtered->height << " data points." << std::endl;
-
-  // Write the downsampled version to disk
+  //pcl::PassThrough<PointT> pass;
+  pcl::NormalEstimationOMP<PointT, pcl::Normal> ne;
+  pcl::SACSegmentationFromNormals<PointT, pcl::Normal> seg; 
   pcl::PCDWriter writer;
-  writer.write<pcl::PointXYZ> ("/home/kangrui/Data/FP_point/GZB_3_Cloud_4_downsampled.pcd", *cloud_filtered, false);
+  pcl::ExtractIndices<PointT> extract;
+  pcl::ExtractIndices<pcl::Normal> extract_normals;
+  pcl::search::KdTree<PointT>::Ptr tree (new pcl::search::KdTree<PointT> ());
+  clock_t start, end;
 
-  pcl::ModelCoefficients::Ptr coefficients (new pcl::ModelCoefficients ());
-  pcl::PointIndices::Ptr inliers (new pcl::PointIndices ());
-  // Create the segmentation object
-  pcl::SACSegmentation<pcl::PointXYZ> seg;
-  // Optional
+  // Datasets
+  pcl::PointCloud<PointT>::Ptr cloud (new pcl::PointCloud<PointT>), cloud_f(new pcl::PointCloud<PointT>);
+  pcl::PointCloud<PointT>::Ptr cloud_cylinder (new pcl::PointCloud<PointT> ());
+  //pcl::PointCloud<PointT>::Ptr cloud_filtered (new pcl::PointCloud<PointT>);
+  pcl::PointCloud<pcl::Normal>::Ptr cloud_normals (new pcl::PointCloud<pcl::Normal>);
+  //pcl::PointCloud<PointT>::Ptr cloud_filtered2 (new pcl::PointCloud<PointT>);
+  pcl::PointCloud<pcl::Normal>::Ptr cloud_normals2 (new pcl::PointCloud<pcl::Normal>);
+  pcl::ModelCoefficients::Ptr coefficients_plane (new pcl::ModelCoefficients), coefficients_cylinder (new pcl::ModelCoefficients);
+  pcl::PointIndices::Ptr inliers_plane (new pcl::PointIndices), inliers_cylinder (new pcl::PointIndices);
+  ofstream logfile;
+  logfile.open("log.txt",ios::out | ios::trunc);
+
+  // Read in the cloud data
+  string data_root = "/home/kangrui/Data/FP_point/";
+  string data_name = "GZB_3_Cloud_4_downsampled";
+  reader.read (data_root + data_name + ".pcd", *cloud);
+  cerr << "PointCloud has: " << cloud->size () << " data points." << endl;
+  logfile<<"PointCloud has: " << cloud->size () << " data points." << endl;
+  // Estimate point normals
+  cerr << "Computing normals......"<<endl;
+  ne.setSearchMethod (tree);
+  ne.setInputCloud (cloud);
+  ne.setKSearch (20);
+  ne.compute (*cloud_normals);
+
+  //Create the segmentation object for cylinder segmentation and set all the parameters
   seg.setOptimizeCoefficients (true);
-  // Mandatory
   seg.setModelType (pcl::SACMODEL_CYLINDER);
   seg.setMethodType (pcl::SAC_RANSAC);
-  seg.setMaxIterations (1000);
-  seg.setDistanceThreshold (0.01);
+  seg.setNormalDistanceWeight (0.1);
+  seg.setMaxIterations (10000);
+  seg.setDistanceThreshold (0.2);
+  seg.setRadiusLimits (0.4, 0.6);
 
-  // Create the filtering object
-  pcl::ExtractIndices<pcl::PointXYZ> extract;
+  //Extract in a loop
+  //int i = 0, nr_points = (int) cloud->size ();
+  //cerr << "Start loop......"<<endl;
+  
+  volatile bool finish_flag=false;
 
-  int i = 0, nr_points = (int) cloud_filtered->size ();
-  // While 30% of the original cloud is still there
-  while (cloud_filtered->size () > 0.3 * nr_points)
-  {
-    // Segment the largest planar component from the remaining cloud
-    seg.setInputCloud (cloud_filtered);
-    seg.segment (*inliers, *coefficients);
-    if (inliers->indices.size () == 0)
-    {
-      std::cerr << "Could not estimate a planar model for the given dataset." << std::endl;
+
+  //#pragma omp parallel for
+  for(int i = 0; i<=15; i++){
+    // if(finish_flag==true){
+    //   continue;
+    // }
+    logfile<<"column_"<< i <<endl;
+    start = clock();
+    seg.setInputCloud (cloud);
+    seg.setInputNormals (cloud_normals);
+    // Obtain the cylinder inliers and coefficients
+    cerr << "Computing cylinder......"<<endl;
+    seg.segment (*inliers_cylinder, *coefficients_cylinder);
+    if (inliers_cylinder->indices.size()==0){
+      cerr << "Could not estimate a cylinder model for the given dataset." << endl;
+      //finish_flag==true;
       break;
     }
-
-    // Extract the inliers
-    extract.setInputCloud (cloud_filtered);
-    extract.setIndices (inliers);
+    else
+      cerr << "Cylinder coefficients: " << *coefficients_cylinder << endl;
+      cerr << "Radius: " << coefficients_cylinder->values[6] << endl;
+      logfile << "Cylinder coefficients: " << *coefficients_cylinder << endl;
+    // Write the cylinder inliers to disk
+    extract.setInputCloud (cloud);
+    extract.setIndices (inliers_cylinder);
     extract.setNegative (false);
-    extract.filter (*cloud_p);
-    std::cerr << "PointCloud representing the planar component: " << cloud_p->width * cloud_p->height << " data points." << std::endl;
+    extract.filter (*cloud_cylinder);
 
-    std::stringstream ss;
-    ss << "/home/kangrui/Data/FP_point/GZB_3_Cloud_4_column_" << i << ".pcd";
-    writer.write<pcl::PointXYZ> (ss.str (), *cloud_p, false);
+    cerr << "PointCloud representing the cylindrical component: " << cloud_cylinder->size () << " data points." << endl;
+    logfile << "PointCloud representing the cylindrical component: " << cloud_cylinder->size () << " data points." << endl;
+    stringstream ss;
+    ss << data_root << data_name << "_cylinder_" << i << ".pcd";
+    writer.write (ss.str(), *cloud_cylinder, false);
 
-    // Create the filtering object
-    extract.setNegative (true); //正常提取还是反向提取, 设定为true应是反向提取
+    // Create the remaining point cloud
+    extract.setNegative (true); 
     extract.filter (*cloud_f);
-    cloud_filtered.swap (cloud_f);//swap, 交换
-    i++;
+    cloud.swap (cloud_f);
+    extract_normals.setNegative (true);
+    extract_normals.setInputCloud (cloud_normals);
+    extract_normals.setIndices (inliers_cylinder);
+    extract_normals.filter (*cloud_normals2);
+    cloud_normals.swap(cloud_normals2);
+    end = clock();
+    cerr << "This Loop using time: "<<(double)(end-start)/CLOCKS_PER_SEC << "s" << endl;
+    logfile<< "This Loop using time: "<<(double)(end-start)/CLOCKS_PER_SEC << "s" << endl;
   }
-
+  cerr << "Remaining PointCloud: " << cloud->size () << " data points." << endl
+            << "Writing to a new file......." << endl;
+  writer.write (data_root + data_name + "_without_cylinder.pcd", *cloud, false);
   return (0);
 }

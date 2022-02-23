@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.5 FATAL_ERROR)
-add_definitions("-std=c++11")
+
 
 project(downsample)
 
