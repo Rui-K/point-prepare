@@ -10,10 +10,44 @@
 #include <pcl/features/normal_3d_omp.h>
 #include <ctime>
 #include <fstream>
+#include <sstream>
 #include <iostream>
+#include<cmath>
 
 typedef pcl::PointXYZ PointT;//rename PointXYZ PointT
 using namespace std;
+
+string get_date(){
+  // 基于当前系统的当前日期/时间
+   time_t now = time(0);
+ 
+   //cout << "1970 到目前经过秒数:" << now << endl;
+ 
+   tm *ltm = localtime(&now);
+ 
+   // 输出 tm 结构的各个组成部分
+   //cout << "年: "<< 1900 + ltm->tm_year << endl;
+  //  cout << "月: "<< 1 + ltm->tm_mon<< endl;
+  //  cout << "日: "<<  ltm->tm_mday << endl;
+  //  cout << "时间: "<< ltm->tm_hour << ":";
+  //  cout << ltm->tm_min << ":";
+  //  cout << ltm->tm_sec << endl;
+   stringstream ss;
+   ss<<1 + ltm->tm_mon<<"-"<<ltm->tm_mday;
+   return(ss.str());
+}
+
+int judge(pcl::ModelCoefficients::Ptr coefficients){
+  double nx = coefficients->values[3], ny = coefficients->values[4], nz = coefficients->values[5];
+  //vector<int> label = {0,1,2};
+  if(fabs(nz)<0.01){
+    return 0;
+  }else if( fabs(nx)<0.01 && fabs(ny)<0.01 && (fabs(nz)-1)<0.01 ){
+    return 1;
+  }else
+  return 2;
+}
+
 
 int
 main ()
@@ -39,16 +73,17 @@ main ()
   pcl::ModelCoefficients::Ptr coefficients_plane (new pcl::ModelCoefficients), coefficients_cylinder (new pcl::ModelCoefficients);
   pcl::PointIndices::Ptr inliers_plane (new pcl::PointIndices), inliers_cylinder (new pcl::PointIndices);
   ofstream logfile;
-  logfile.open("log.txt",ios::out | ios::trunc);
+  string date = get_date();
+  logfile.open("log_"+date+".txt",ios::out | ios::trunc);
 
   // Read in the cloud data
   string data_root = "/home/kangrui/Data/FP_point/";
   string data_name = "GZB_3_Cloud_4_downsampled";
   reader.read (data_root + data_name + ".pcd", *cloud);
-  cerr << "PointCloud has: " << cloud->size () << " data points." << endl;
+  cout << "PointCloud has: " << cloud->size () << " data points." << endl;
   logfile<<"PointCloud has: " << cloud->size () << " data points." << endl;
   // Estimate point normals
-  cerr << "Computing normals......"<<endl;
+  cout << "Computing normals......"<<endl;
   ne.setSearchMethod (tree);
   ne.setInputCloud (cloud);
   ne.setKSearch (20);
@@ -59,19 +94,19 @@ main ()
   seg.setModelType (pcl::SACMODEL_CYLINDER);
   seg.setMethodType (pcl::SAC_RANSAC);
   seg.setNormalDistanceWeight (0.1);
-  seg.setMaxIterations (10000);
-  seg.setDistanceThreshold (0.2);
+  seg.setMaxIterations (20000);
+  seg.setDistanceThreshold (0.15);//误差容忍范围,sigma
   seg.setRadiusLimits (0.4, 0.6);
 
   //Extract in a loop
   //int i = 0, nr_points = (int) cloud->size ();
-  //cerr << "Start loop......"<<endl;
+  //cout << "Start loop......"<<endl;
   
   volatile bool finish_flag=false;
-
+  int count;
 
   //#pragma omp parallel for
-  for(int i = 0; i<=15; i++){
+  for(int i = 0; i<=50; i++){
     // if(finish_flag==true){
     //   continue;
     // }
@@ -80,16 +115,17 @@ main ()
     seg.setInputCloud (cloud);
     seg.setInputNormals (cloud_normals);
     // Obtain the cylinder inliers and coefficients
-    cerr << "Computing cylinder......"<<endl;
+    cout << "Computing cylinder......"<<endl;
     seg.segment (*inliers_cylinder, *coefficients_cylinder);
     if (inliers_cylinder->indices.size()==0){
-      cerr << "Could not estimate a cylinder model for the given dataset." << endl;
+      cout << "Could not estimate a cylinder model for the given dataset." << endl;
+      logfile << "Could not estimate a cylinder model for the given dataset." << endl;
       //finish_flag==true;
       break;
     }
     else
-      cerr << "Cylinder coefficients: " << *coefficients_cylinder << endl;
-      cerr << "Radius: " << coefficients_cylinder->values[6] << endl;
+      cout << "Cylinder coefficients: " << *coefficients_cylinder << endl;
+      cout << "Radius: " << coefficients_cylinder->values[6] << endl;
       logfile << "Cylinder coefficients: " << *coefficients_cylinder << endl;
     // Write the cylinder inliers to disk
     extract.setInputCloud (cloud);
@@ -97,10 +133,19 @@ main ()
     extract.setNegative (false);
     extract.filter (*cloud_cylinder);
 
-    cerr << "PointCloud representing the cylindrical component: " << cloud_cylinder->size () << " data points." << endl;
+    cout << "PointCloud representing the cylindrical component: " << cloud_cylinder->size () << " data points." << endl;
     logfile << "PointCloud representing the cylindrical component: " << cloud_cylinder->size () << " data points." << endl;
     stringstream ss;
-    ss << data_root << data_name << "_cylinder_" << i << ".pcd";
+    int label = judge(coefficients_cylinder);
+    if(label==2){
+      count += 1;
+      if (count>3){
+        cout << "Too much non-cylinder elements, shut down!" <<endl;
+        logfile << "Too much non-cylinder elements, shut down!" <<endl;
+        break;
+      }
+    }
+    ss << data_root << date << "/" << label << "_" <<data_name << "_cylinder_" << i << ".pcd";
     writer.write (ss.str(), *cloud_cylinder, false);
 
     // Create the remaining point cloud
@@ -113,11 +158,11 @@ main ()
     extract_normals.filter (*cloud_normals2);
     cloud_normals.swap(cloud_normals2);
     end = clock();
-    cerr << "This Loop using time: "<<(double)(end-start)/CLOCKS_PER_SEC << "s" << endl;
-    logfile<< "This Loop using time: "<<(double)(end-start)/CLOCKS_PER_SEC << "s" << endl;
+    cout << "This Loop using time: "<<(double)(end-start)/CLOCKS_PER_SEC << "s" << endl;
+    logfile<< "This Loop using time: "<<(double)(end-start)/CLOCKS_PER_SEC << "s" << endl << endl;
   }
-  cerr << "Remaining PointCloud: " << cloud->size () << " data points." << endl
+  cout << "Remaining PointCloud: " << cloud->size () << " data points." << endl
             << "Writing to a new file......." << endl;
-  writer.write (data_root + data_name + "_without_cylinder.pcd", *cloud, false);
+  writer.write (data_root + date + "/" + data_name + "_without_cylinder.pcd", *cloud, false);
   return (0);
 }
